@@ -374,31 +374,95 @@ function fillets(cols, rows, mask, tw, th) {
   }
   return out;
 }
-// A door edit is one column cut from the ground up two tiles, with the top tile and both sides left.
+// Every wall edit Fortnite allows. Patterns list kept tiles, top row first. 'mirror' and 'dihedral'
+// add the flipped/rotated versions the chart marks; window and door list their shifted positions.
+const WALL_EDITS = {};
+(() => {
+  const parse = str => {
+    let m = 0;
+    str.split('/').forEach((row, r) => [...row].forEach((c, u) => { if (c === '1') m |= 1 << (u + 3 * (2 - r)); }));
+    return m;
+  };
+  const xf = (m, f) => {
+    let o = 0;
+    for (let v = 0; v < 3; v++) for (let u = 0; u < 3; u++) if (m >> (u + 3 * v) & 1) { const [a, b] = f(u, v); o |= 1 << (a + 3 * b); }
+    return o;
+  };
+  const same = (u, v) => [u, v], mirror = (u, v) => [2 - u, v];
+  const dihedral = [same, mirror, (u, v) => [u, 2 - v], (u, v) => [2 - u, 2 - v],
+    (u, v) => [v, u], (u, v) => [2 - v, u], (u, v) => [v, 2 - u], (u, v) => [2 - v, 2 - u]];
+  const add = (name, pats, mode) => {
+    const fs = mode === 'dihedral' ? dihedral : mode === 'mirror' ? [same, mirror] : [same];
+    for (const str of pats) for (const f of fs) { const k = xf(parse(str), f); if (!(k in WALL_EDITS)) WALL_EDITS[k] = name; }
+  };
+  add('Wall', ['111/111/111']);
+  add('Window', ['111/101/111', '111/011/111', '111/110/111']);
+  add('Door', ['111/101/101', '111/011/011', '111/110/110']);
+  add('Half wall', ['000/111/111']);
+  add('Double window', ['111/010/111']);
+  add('Half wall door', ['000/110/110', '000/101/101'], 'mirror');
+  add('Low wall', ['000/000/111']);
+  add('Small low wall', ['000/000/110'], 'dihedral');
+  add('Door + window', ['111/010/110'], 'mirror');
+  add('Side wall', ['100/100/100'], 'dihedral');
+  add('Small side wall', ['000/100/100'], 'dihedral');
+  add('Triangle', ['100/110/111'], 'dihedral');
+  add('Arch', ['111/101/000']);
+  add('Half arch', ['111/100/100'], 'mirror');
+})();
+const wallFamily = m => WALL_EDITS[m] || null;
+const DOOR_EDITS = new Set(['Door', 'Half wall door', 'Door + window']);
+// The door sits in the column cut from the ground up two tiles with wall on both sides.
 function doorColumn(mask) {
+  if (!DOOR_EDITS.has(wallFamily(mask))) return -1;
   const has = i => (mask >> i & 1) === 1;
   for (let u = 0; u < 3; u++) {
-    if (has(u) || has(u + 3) || !has(u + 6)) continue;
+    if (has(u) || has(u + 3)) continue;
     let ok = true;
     for (const nu of [u - 1, u + 1]) if (nu >= 0 && nu < 3 && (!has(nu) || !has(nu + 3))) ok = false;
     if (ok) return u;
   }
   return -1;
 }
-function tilesConnected(mask) {
-  const cells = [];
-  for (let i = 0; i < 9; i++) if (mask >> i & 1) cells.push(i);
-  if (!cells.length) return false;
-  const seen = new Set([cells[0]]), q = [cells[0]];
-  while (q.length) {
-    const i = q.pop(), u = i % 3, v = (i / 3) | 0;
-    for (const [du, dv] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const nu = u + du, nv = v + dv, n = nu + 3 * nv;
-      if (nu < 0 || nv < 0 || nu > 2 || nv > 2 || !(mask >> n & 1) || seen.has(n)) continue;
-      seen.add(n); q.push(n);
-    }
+const ARCH_LEG = .32;
+function archShape() {
+  const sh = new THREE.Shape(), sy = H / 3, rx = T / 2 - ARCH_LEG, ry = H / 3;
+  sh.moveTo(0, 0); sh.lineTo(ARCH_LEG, 0); sh.lineTo(ARCH_LEG, sy);
+  for (let i = 1; i <= 24; i++) { const a = Math.PI - Math.PI * i / 24; sh.lineTo(T / 2 + rx * Math.cos(a), sy + ry * Math.sin(a)); }
+  sh.lineTo(T - ARCH_LEG, 0); sh.lineTo(T, 0); sh.lineTo(T, H); sh.lineTo(0, H); sh.lineTo(0, 0);
+  return sh;
+}
+function triangleShape(mask) {
+  const has = (u, v) => (mask >> (u + 3 * v) & 1) === 1;
+  const col = [0, 2].find(u => has(u, 0) && has(u, 1) && has(u, 2));
+  const row = [0, 2].find(v => has(0, v) && has(1, v) && has(2, v));
+  const kx = col === 0 ? 0 : T, ky = row === 0 ? 0 : H;
+  return new THREE.Shape([new THREE.Vector2(kx, ky), new THREE.Vector2(T - kx, ky), new THREE.Vector2(kx, H - ky)]);
+}
+const FLOOR_NAMES = { 4: 'Floor', 3: '3/4 floor', 1: 'Corner' };
+function floorName(m) { const n = [0, 1, 2, 3].filter(q => m >> q & 1).length; return n === 2 ? (m === 9 || m === 6 ? 'Bridge' : 'Half floor') : FLOOR_NAMES[n]; }
+function coneName(f) { const n = [0, 1, 2, 3].filter(q => f >> q & 1).length; return ['Pyramid', '1/4 pyramid', f === 9 || f === 6 ? 'Half inverted pyramid' : 'Ramp pyramid', '1/4 inverted pyramid', 'Inverted pyramid'][n]; }
+
+// Stairs: a full ramp, or a path of 2-4 tiles (half, L-shaped, U-shaped) climbing along the drag.
+const stepDir = (a, b) => { const du = (b & 1) - (a & 1), dv = (b >> 1) - (a >> 1); return du > 0 ? 0 : du < 0 ? 2 : dv > 0 ? 1 : 3; };
+function rampTiles(p) {
+  const out = [null, null, null, null];
+  if (!p.rpath) {
+    for (let q = 0; q < 4; q++) { const k = [q & 1, q >> 1, 1 - (q & 1), 1 - (q >> 1)][p.a]; out[q] = { dir: p.a, h0: k * H / 2, h1: (k + 1) * H / 2 }; }
+    return out;
   }
-  return seen.size === cells.length;
+  const path = p.rpath, n = path.length;
+  for (let i = 0; i < n; i++) {
+    const dir = i < n - 1 ? stepDir(path[i], path[i + 1]) : stepDir(path[i - 1], path[i]);
+    out[path[i]] = { dir, h0: i * H / n, h1: (i + 1) * H / n };
+  }
+  return out;
+}
+function rampHeight(tiles, lu, lv) {
+  const qu = lu < .5 ? 0 : 1, qv = lv < .5 ? 0 : 1, tl = tiles[qu + 2 * qv];
+  if (!tl) return null;
+  const su = Math.min(1, Math.max(0, lu * 2 - qu)), sv = Math.min(1, Math.max(0, lv * 2 - qv));
+  return tl.h0 + (tl.h1 - tl.h0) * [su, sv, 1 - su, 1 - sv][tl.dir];
 }
 
 function buildMesh(d, mats, lineMat) {
@@ -411,12 +475,17 @@ function buildMesh(d, mats, lineMat) {
   };
   let c;
   if (d.type === 'wall') {
-    for (let v = 0; v < 3; v++) for (let u = 0; u < 3; u++) {
-      if (!(d.mask >> (u + 3 * v) & 1)) continue;
-      const geo = new THREE.BoxGeometry(T / 3, H / 3, WT); tileUV(geo, u / 3, v / 3, 1 / 3, 1 / 3);
-      add(geo, mats.solid, u * T / 3 + T / 6, v * H / 3 + H / 6, 0);
+    const fam = wallFamily(d.mask);
+    if (fam === 'Arch') add(filletGeo(archShape(), WT, T, H), mats.solid, 0, 0, 0);
+    else if (fam === 'Triangle') add(filletGeo(triangleShape(d.mask), WT, T, H), mats.solid, 0, 0, 0);
+    else {
+      for (let v = 0; v < 3; v++) for (let u = 0; u < 3; u++) {
+        if (!(d.mask >> (u + 3 * v) & 1)) continue;
+        const geo = new THREE.BoxGeometry(T / 3, H / 3, WT); tileUV(geo, u / 3, v / 3, 1 / 3, 1 / 3);
+        add(geo, mats.solid, u * T / 3 + T / 6, v * H / 3 + H / 6, 0);
+      }
+      if (fam === 'Half arch') for (const f of fillets(3, 3, d.mask, T / 3, H / 3)) add(filletGeo(filletShape(f.x, f.y, f.ix, f.iy, f.r), WT, T, H), mats.solid, 0, 0, 0);
     }
-    for (const f of fillets(3, 3, d.mask, T / 3, H / 3)) add(filletGeo(filletShape(f.x, f.y, f.ix, f.iy, f.r), WT, T, H), mats.solid, 0, 0, 0);
     const du = doorColumn(d.mask);
     if (du >= 0 && !lineMat) {
       const hinge = new THREE.Group(); hinge.position.set(du * T / 3 + .03, 0, 0);
@@ -429,6 +498,21 @@ function buildMesh(d, mats, lineMat) {
     g.position.set(d.x * T, d.y * H, d.z * T);
     if (d.a === 'z') g.rotation.y = -Math.PI / 2;
     c = [T / 2, H / 2, 0];
+  } else if (d.type === 'floor' && [1, 2, 4, 8].includes(d.mask)) {
+    // Corner: a quarter circle in the kept tile's corner
+    const q = Math.log2(d.mask), cx = (q & 1) * T, cz = (q >> 1) * T, ix = q & 1 ? -1 : 1, iz = q >> 1 ? -1 : 1;
+    const pts = [new THREE.Vector2(cx, cz)];
+    for (let i = 0; i <= 16; i++) { const a = Math.PI / 2 * i / 16; pts.push(new THREE.Vector2(cx + ix * T / 2 * Math.cos(a), cz + iz * T / 2 * Math.sin(a))); }
+    const geo = filletGeo(new THREE.Shape(pts), FT, T, T); geo.rotateX(Math.PI / 2);
+    add(geo, mats.solid, 0, 0, 0);
+    g.position.set(d.x * T, d.y * H, d.z * T);
+    c = [T / 2, 0, T / 2];
+  } else if (d.type === 'floor' && (d.mask === 9 || d.mask === 6)) {
+    // Bridge: a diagonal plank between the two kept corners
+    const m = add(new THREE.BoxGeometry(T * Math.SQRT2 - T * .3, FT, T * .5), mats.solid, T / 2, 0, T / 2);
+    m.rotation.y = d.mask === 9 ? -Math.PI / 4 : Math.PI / 4;
+    g.position.set(d.x * T, d.y * H, d.z * T);
+    c = [T / 2, 0, T / 2];
   } else if (d.type === 'floor') {
     for (let q = 0; q < 4; q++) {
       if (!(d.mask >> q & 1)) continue;
@@ -438,6 +522,22 @@ function buildMesh(d, mats, lineMat) {
     }
     g.position.set(d.x * T, d.y * H, d.z * T);
     c = [T / 2, 0, T / 2];
+  } else if (d.type === 'ramp' && d.rpath) {
+    const tiles = rampTiles(d);
+    for (let q = 0; q < 4; q++) {
+      const tl = tiles[q]; if (!tl) continue;
+      const sub = new THREE.Group(); sub.position.set((q & 1) * T / 2 - T / 4, 0, (q >> 1) * T / 2 - T / 4); sub.rotation.y = RAMP_ROT[tl.dir]; content.add(sub);
+      const run = T / 2, rise = tl.h1 - tl.h0, ang = Math.atan2(rise, run);
+      const slab = new THREE.Mesh(new THREE.BoxGeometry(Math.hypot(run, rise), RT, T / 2), mats.ramp);
+      slab.rotation.z = ang; slab.position.set(Math.sin(ang) * RT / 2, (tl.h0 + tl.h1) / 2 - Math.cos(ang) * RT / 2, 0);
+      slab.visible = false; sub.add(slab);
+      for (let i = 0; i < 5; i++) {
+        const tr = new THREE.Mesh(new THREE.BoxGeometry(run / 5 * .86, .09, T / 2 - .08), mats.solid);
+        tr.position.set(-run / 2 + (i + .5) * run / 5, tl.h0 + (i + .5) * rise / 5 - .02, 0); sub.add(tr);
+      }
+    }
+    g.position.set(d.x * T + T / 2, d.y * H, d.z * T + T / 2);
+    c = [0, H / 2, 0];
   } else if (d.type === 'ramp') {
     const m = add(new THREE.BoxGeometry(RAMP_LEN, RT, T), mats.ramp, Math.sin(RAMP_ANG) * RT / 2, H / 2 - Math.cos(RAMP_ANG) * RT / 2, 0);
     m.rotation.z = RAMP_ANG;
@@ -475,6 +575,10 @@ function pieceSolids(p) {
       if (p.a === 'x') out.push({ box: true, min: [x0 + u * T / 3, ya, z0 - WT / 2], max: [x0 + (u + 1) * T / 3, yb, z0 + WT / 2], piece: p });
       else out.push({ box: true, min: [x0 - WT / 2, ya, z0 + u * T / 3], max: [x0 + WT / 2, yb, z0 + (u + 1) * T / 3], piece: p });
     }
+    if (wallFamily(p.mask) === 'Arch') for (const [a0, a1] of [[0, ARCH_LEG], [T - ARCH_LEG, T]]) {
+      if (p.a === 'x') out.push({ box: true, min: [x0 + a0, y0, z0 - WT / 2], max: [x0 + a1, y0 + H / 3, z0 + WT / 2], piece: p });
+      else out.push({ box: true, min: [x0 - WT / 2, y0, z0 + a0], max: [x0 + WT / 2, y0 + H / 3, z0 + a1], piece: p });
+    }
     const du = doorColumn(p.mask);
     if (du >= 0) {
       const a0 = du * T / 3, a1 = a0 + T / 3, top = y0 + H * 2 / 3;
@@ -487,11 +591,12 @@ function pieceSolids(p) {
       const qu = q & 1, qv = q >> 1;
       out.push({ box: true, min: [x0 + qu * T / 2, y0 - FT / 2, z0 + qv * T / 2], max: [x0 + (qu + 1) * T / 2, y0 + FT / 2, z0 + (qv + 1) * T / 2], piece: p });
     }
+    if (p.mask === 9 || p.mask === 6) out.push({ box: true, min: [x0 + T * .3, y0 - FT / 2, z0 + T * .3], max: [x0 + T * .7, y0 + FT / 2, z0 + T * .7], piece: p });
   } else if (p.type === 'ramp') {
+    const tiles = rampTiles(p);
     out.push({ box: false, x0, x1: x0 + T, z0, z1: z0 + T, piece: p, h: (x, z) => {
-      const u = (x - x0) / T, v = (z - z0) / T;
-      const t = p.a === 0 ? u : p.a === 1 ? v : p.a === 2 ? 1 - u : 1 - v;
-      return y0 + H * t;
+      const r = rampHeight(tiles, (x - x0) / T, (z - z0) / T);
+      return r === null ? null : y0 + r;
     } });
   } else {
     out.push({ box: false, x0, x1: x0 + T, z0, z1: z0 + T, piece: p, h: (x, z) => {
@@ -836,11 +941,12 @@ function makeOverlay(p) {
       tile(g, T / 2 * .92, th, T / 2 * .92, u * T, y, v * T, q);
     }
   } else {
-    const sub = new THREE.Group(); sub.position.set(0, H / 2, 0); sub.rotation.z = RAMP_ANG; g.add(sub);
-    for (const su of [-1, 0, 1]) for (const sv of [-1, 0, 1]) tile(sub, RAMP_LEN / 3 * .92, .08, T / 3 * .92, su * RAMP_LEN / 3, .12, sv * T / 3, -1);
-    g.updateMatrixWorld(true);
-    const x0 = p.x * T, z0 = p.z * T, w = new V3(), cell = n => Math.max(0, Math.min(2, Math.floor(n / T * 3)));
-    for (const t of tiles) { t.getWorldPosition(w); t.userData.idx = cell(w.x - x0) + 3 * cell(w.z - z0); }
+    g.position.set(p.x * T, p.y * H, p.z * T); g.rotation.set(0, 0, 0);
+    const rt = rampTiles(p);
+    for (let q = 0; q < 4; q++) {
+      const u = (q & 1) * .5 + .25, v = (q >> 1) * .5 + .25, h = rampHeight(rt, u, v);
+      tile(g, T / 2 * .92, .08, T / 2 * .92, u * T, h === null ? .1 : h + .15, v * T, q);
+    }
   }
   g.userData.tiles = tiles; scene.add(g); return g;
 }
@@ -863,7 +969,7 @@ function updateEdit() {
   const idx = hit ? hit.object.userData.idx : -1;
   if (idx !== edit.hover) { edit.hover = idx; if (idx >= 0) sfx('tick'); }
   if (edit.drag && idx >= 0) {
-    if (p.type === 'ramp') { if (edit.path[edit.path.length - 1] !== idx) edit.path.push(idx); }
+    if (p.type === 'ramp') { if (!edit.path.includes(idx)) { edit.path.push(idx); popTile(idx); sfx('edit'); } }
     else if (edit.add ? !edit.sel.has(idx) : edit.sel.has(idx)) { if (edit.add) edit.sel.add(idx); else edit.sel.delete(idx); popTile(idx); sfx('edit'); }
   }
   paintTiles();
@@ -893,33 +999,46 @@ function editRelease() {
 function confirmEdit() {
   const p = edit.piece;
   if (p.type === 'ramp') {
-    const path = edit.path;
-    if (path.length >= 2) {
-      const a = path[0], b = path[path.length - 1];
-      const du = b % 3 - a % 3, dv = ((b / 3) | 0) - ((a / 3) | 0);
-      let nd = -1;
-      if (du || dv) nd = Math.abs(du) >= Math.abs(dv) ? (du > 0 ? 0 : 2) : (dv > 0 ? 1 : 3);
-      if (nd >= 0 && nd !== p.a) { p.a = nd; rebuildPiece(p); checkSupport(); sfx('confirm'); }
+    const path = edit.path, n = path.length;
+    if (!n) { exitEdit(); return; }
+    const adj = (a, b) => Math.abs((b & 1) - (a & 1)) + Math.abs((b >> 1) - (a >> 1)) === 1;
+    let chain = true;
+    for (let i = 0; i < n - 1; i++) if (!adj(path[i], path[i + 1])) chain = false;
+    if (n === 4 && !chain) {
+      // Full ramp: cut through all four tiles with a diagonal; it climbs away from where the drag started.
+      const a = path[0], b = path[n - 1], yd = quantDir();
+      let dir;
+      if ((path[0] >> 1) === (path[1] >> 1)) { const dv = (b >> 1) - (a >> 1); dir = dv > 0 ? 1 : dv < 0 ? 3 : (yd % 2 ? yd : 1); }
+      else { const du = (b & 1) - (a & 1); dir = du > 0 ? 0 : du < 0 ? 2 : (yd % 2 ? 0 : yd); }
+      if (p.rpath || dir !== p.a) { p.rpath = null; p.a = dir; rebuildPiece(p); checkSupport(); }
+      toast('Ramp');
+    } else if (n >= 2 && chain) {
+      p.rpath = path.slice(); p.a = stepDir(path[0], path[1]); rebuildPiece(p); checkSupport();
+      toast(n === 2 ? 'Half ramp' : n === 3 ? 'L-shaped ramp' : 'U-shaped ramp');
+    } else {
+      toast("Can't make that edit"); sfx('deny'); edit.flash = 1; edit.path = []; return;
     }
+    sfx('confirm');
   } else if (p.type === 'cone') {
     let flip = 0;
     for (const i of edit.sel) flip |= 1 << i;
-    if (flip !== (p.flip || 0)) { p.flip = flip; rebuildPiece(p); sfx('confirm'); }
+    if (flip !== (p.flip || 0)) { p.flip = flip; rebuildPiece(p); sfx('confirm'); toast(coneName(flip)); }
   } else {
     const n = p.type === 'wall' ? 9 : 4; let mask = (1 << n) - 1;
     for (const i of edit.sel) mask &= ~(1 << i);
-    // Same rules as Fortnite: at least one tile stays, and the tiles left on a wall can't split into floating chunks.
-    if (!mask || (p.type === 'wall' && !tilesConnected(mask))) {
+    // Walls only accept the edits on Fortnite's chart; floors need at least one tile.
+    if (!mask || (p.type === 'wall' && !wallFamily(mask))) {
       toast(mask ? "Can't make that edit" : 'Keep at least one tile'); sfx('deny');
       selFromMask(); edit.flash = 1; edit.path = []; return;
     }
-    if (mask !== p.mask) { p.mask = mask; p.doorOpen = 0; rebuildPiece(p); sfx('confirm'); }
+    if (mask !== p.mask) { p.mask = mask; p.doorOpen = 0; rebuildPiece(p); sfx('confirm'); toast(p.type === 'wall' ? wallFamily(mask) : floorName(mask)); }
   }
   exitEdit();
 }
 function resetEdit() {
   const p = edit.piece;
   if (p.type === 'cone' && p.flip) { p.flip = 0; rebuildPiece(p); }
+  else if (p.type === 'ramp' && p.rpath) { p.rpath = null; rebuildPiece(p); checkSupport(); }
   else if (p.type !== 'ramp' && p.type !== 'cone' && p.mask !== fullMask(p.type)) { p.mask = fullMask(p.type); p.doorOpen = 0; rebuildPiece(p); }
   sfx('confirm'); exitEdit();
 }
@@ -1200,7 +1319,7 @@ function refreshHud(force) {
   document.querySelectorAll('.mat').forEach(s => s.classList.toggle('on', s.dataset.mat === MAT_ORDER[matIdx]));
   const ml = $('modeLabel');
   if (mode === 'build') ml.innerHTML = 'Build · <b>' + TYPE_NAME[buildType] + '</b> · ' + MATS[MAT_ORDER[matIdx]].name + ' <span style="opacity:.7">(right-click to switch)</span>';
-  else if (mode === 'edit') ml.innerHTML = '<b>Editing ' + TYPE_NAME[edit.piece.type] + '</b> · ' + (edit.piece.type === 'ramp' ? 'drag toward the side the stairs should climb to' : edit.piece.type === 'cone' ? 'select corners to flip them up' : 'drag across tiles to cut them');
+  else if (mode === 'edit') ml.innerHTML = '<b>Editing ' + TYPE_NAME[edit.piece.type] + '</b> · ' + (edit.piece.type === 'ramp' ? 'drag a path: 2 tiles half, 3 L-shape, 4 U-shape, diagonal through all 4 full' : edit.piece.type === 'cone' ? 'select corners to flip them up' : 'drag across tiles to cut them');
   else if (mode === 'rifle') ml.innerHTML = '<b>Assault rifle</b> · hold to fire';
   else ml.innerHTML = '<b>Pickaxe</b> · harvest trees, rocks and crates';
   $('crosshair').classList.toggle('build', mode === 'build' || mode === 'edit');
@@ -1475,14 +1594,15 @@ if (window.matchMedia && matchMedia('(pointer: coarse)').matches && !matchMedia(
 /* ---------- starter fort so the first frame shows the mechanics ---------- */
 function seedBuilds(list) {
   for (const b of list) {
-    const p = makePiece(b, b.m, { mask: b.mask != null && b.type !== 'cone' ? b.mask : fullMask(b.type), flip: b.flip || 0, hp: MATS[b.m].hp, building: false });
+    const p = makePiece(b, b.m, { mask: b.mask != null && b.type !== 'cone' ? b.mask : fullMask(b.type), flip: b.flip || 0, rpath: b.rpath || null, hp: MATS[b.m].hp, building: false });
     if (!pieces.has(p.key)) attachPiece(p);
   }
 }
 const starter = [
   { type: 'wall', a: 'x', x: -2, y: 0, z: -1, m: 'wood' },
   { type: 'wall', a: 'x', x: -1, y: 0, z: -1, m: 'wood', mask: 511 & ~(1 << 1) & ~(1 << 4) },
-  { type: 'wall', a: 'z', x: 0, y: 0, z: -1, m: 'brick', mask: 511 & ~(1 << 0) & ~(1 << 1) },
+  { type: 'wall', a: 'z', x: 0, y: 0, z: -1, m: 'brick', mask: 511 & ~(1 << 0 | 1 << 1 | 1 << 3 | 1 << 4) },
+  { type: 'wall', a: 'x', x: 1, y: 0, z: -1, m: 'wood', mask: 511 & ~(1 << 0 | 1 << 1 | 1 << 2 | 1 << 4) },
   { type: 'wall', a: 'z', x: -2, y: 0, z: -1, m: 'brick' },
   { type: 'wall', a: 'z', x: -2, y: 0, z: -2, m: 'brick' },
   { type: 'floor', x: -2, y: 1, z: -2, m: 'wood' },
@@ -1544,7 +1664,7 @@ function frame(t) {
 
 function snapshot() {
   return {
-    builds: [...pieces.values()].map(p => ({ type: p.type, a: p.a, x: p.x, y: p.y, z: p.z, m: p.mat, mask: p.mask, flip: p.flip || 0 })),
+    builds: [...pieces.values()].map(p => ({ type: p.type, a: p.a, x: p.x, y: p.y, z: p.z, m: p.mat, mask: p.mask, flip: p.flip || 0, rpath: p.rpath || null })),
     mats: { ...mats }, stats: { ...stats }, pos: [P.x, P.y, P.z], yaw, pitch,
   };
 }
@@ -1561,5 +1681,28 @@ function start(data) {
 }
 const hot = window.claude && window.claude.hot;
 if (hot && typeof hot.snapshot === 'function') { try { hot.snapshot(snapshot); } catch (e) {} }
-if (hot && typeof hot.ready === 'function') hot.ready(start); else start(hot && hot.data);
+// Live reload: when the page comes from the local dev server (and through the tunnel), poll its
+// /__version and reload on change, carrying builds, materials and position across the reload.
+function takeReloadState() {
+  try { const d = sessionStorage.getItem('bfl-reload'); if (d) { sessionStorage.removeItem('bfl-reload'); return JSON.parse(d); } } catch (e) {}
+  return null;
+}
+let servedVersion = null;
+async function pollVersion() {
+  try {
+    const r = await fetch('__version', { cache: 'no-store' });
+    if (!r.ok) return;
+    const v = (await r.text()).trim();
+    if (servedVersion && v !== servedVersion) {
+      try { sessionStorage.setItem('bfl-reload', JSON.stringify(snapshot())); } catch (e) {}
+      location.reload(); return;
+    }
+    servedVersion = v;
+  } catch (e) {}
+  setTimeout(pollVersion, 1500);
+}
+const reloaded = takeReloadState();
+if (hot && typeof hot.ready === 'function') hot.ready(start); else start((hot && hot.data) || reloaded);
+if (reloaded) toast('Updated to the latest version');
+pollVersion();
 })();
