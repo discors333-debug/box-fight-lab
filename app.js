@@ -312,12 +312,26 @@ function tileUV(geo, u0, v0, su, sv) {
   for (let i = 0; i < uv.count; i++) uv.setXY(i, u0 + uv.getX(i) * su, v0 + uv.getY(i) * sv);
   uv.needsUpdate = true;
 }
-function coneHeight(u, v) { return CH * (1 - 2 * Math.max(Math.abs(u - .5), Math.abs(v - .5))); }
-function coneQuadGeo(q) {
-  const qu = q & 1, qv = q >> 1;
-  const outer = [qu, qv], midA = [.5, qv], midB = [qu, .5], apex = [.5, .5];
+// Cones: each corner is down (0) or flipped up (CH). Editing a tile flips its corner, so two
+// tiles on one side make a sloped roof and all four turn the cone upside down.
+function coneCorners(flip) { return [0, 1, 2, 3].map(q => (flip >> q & 1) ? CH : 0); }   // q = u + 2v
+function coneCenter(h) { return CH - (h[0] + h[1] + h[2] + h[3]) / 4; }
+function bary(px, py, a, b, c) {
+  const d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+  const w1 = ((b[1] - c[1]) * (px - c[0]) + (c[0] - b[0]) * (py - c[1])) / d;
+  const w2 = ((c[1] - a[1]) * (px - c[0]) + (a[0] - c[0]) * (py - c[1])) / d;
+  return w1 * a[2] + w2 * b[2] + (1 - w1 - w2) * c[2];
+}
+function coneHeightAt(flip, u, v) {
+  const h = coneCorners(flip), c = [.5, .5, coneCenter(h)];
+  if (Math.abs(v - .5) >= Math.abs(u - .5)) return v < .5 ? bary(u, v, [0, 0, h[0]], [1, 0, h[1]], c) : bary(u, v, [0, 1, h[2]], [1, 1, h[3]], c);
+  return u < .5 ? bary(u, v, [0, 0, h[0]], [0, 1, h[2]], c) : bary(u, v, [1, 0, h[1]], [1, 1, h[3]], c);
+}
+function coneGeo(flip) {
+  const h = coneCorners(flip), cy = coneCenter(h);
+  const ring = [[0, 0, h[0]], [1, 0, h[1]], [1, 1, h[3]], [0, 1, h[2]]];
   const pos = [], uv = [];
-  for (const [u, v] of [outer, midA, apex, outer, apex, midB]) { pos.push(u * T, coneHeight(u, v), v * T); uv.push(u, v); }
+  for (let i = 0; i < 4; i++) for (const [u, v, y] of [ring[i], ring[(i + 1) % 4], [.5, .5, cy]]) { pos.push(u * T, y, v * T); uv.push(u, v); }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
@@ -427,11 +441,23 @@ function buildMesh(d, mats, lineMat) {
   } else if (d.type === 'ramp') {
     const m = add(new THREE.BoxGeometry(RAMP_LEN, RT, T), mats.ramp, Math.sin(RAMP_ANG) * RT / 2, H / 2 - Math.cos(RAMP_ANG) * RT / 2, 0);
     m.rotation.z = RAMP_ANG;
+    if (!lineMat) {
+      m.visible = false;   // still blocks shots and camera, like the solid stairs in Fortnite
+      const N = 10, run = T / N, rise = H / N;
+      for (let i = 0; i < N; i++) {
+        const geo = new THREE.BoxGeometry(run * .86, .09, T - .3); tileUV(geo, 0, i / N, 1, 1 / N);
+        add(geo, mats.solid, -T / 2 + (i + .5) * run, (i + .5) * rise - .02, 0);
+      }
+      for (const side of [-1, 1]) {
+        const str = add(new THREE.BoxGeometry(RAMP_LEN + .1, .42, .14), mats.ramp, 0, H / 2 - .2, side * (T / 2 - .1));
+        str.rotation.z = RAMP_ANG;
+      }
+    }
     g.position.set(d.x * T + T / 2, d.y * H, d.z * T + T / 2);
     g.rotation.y = RAMP_ROT[d.a];
     c = [0, H / 2, 0];
   } else {
-    for (let q = 0; q < 4; q++) if (d.mask >> q & 1) add(coneQuadGeo(q), mats.double, 0, 0, 0);
+    add(coneGeo(d.flip || 0), mats.double, 0, 0, 0);
     g.position.set(d.x * T, d.y * H, d.z * T);
     c = [T / 2, CH / 2, T / 2];
   }
@@ -470,9 +496,7 @@ function pieceSolids(p) {
   } else {
     out.push({ box: false, x0, x1: x0 + T, z0, z1: z0 + T, piece: p, h: (x, z) => {
       const u = (x - x0) / T, v = (z - z0) / T;
-      const q = (u < .5 ? 0 : 1) + (v < .5 ? 0 : 2);
-      if (!(p.mask >> q & 1)) return null;
-      return y0 + coneHeight(u, v);
+      return y0 + coneHeightAt(p.flip || 0, u, v);
     } });
   }
   return out;
@@ -787,7 +811,7 @@ function startEdit() {
   hideGhost();
   const p = o;
   edit = { piece: p, sel: new Set(), path: [], drag: false, add: true, hover: -1, prevMode: mode === 'edit' ? 'pickaxe' : mode };
-  if (p.type !== 'ramp') { const n = p.type === 'wall' ? 9 : 4; for (let i = 0; i < n; i++) if (!(p.mask >> i & 1)) edit.sel.add(i); }
+  selFromPiece(p, edit.sel);
   edit.overlay = makeOverlay(p);
   p.group.visible = false;
   mode = 'edit'; mouseL = false; sfx('edit'); refreshHud(true);
@@ -805,14 +829,18 @@ function makeOverlay(p) {
   if (p.type === 'wall') {
     for (let v = 0; v < 3; v++) for (let u = 0; u < 3; u++) tile(g, T / 3 * .92, H / 3 * .92, WT + .12, u * T / 3 + T / 6, v * H / 3 + H / 6, 0, u + 3 * v);
   } else if (p.type === 'floor' || p.type === 'cone') {
-    const y = p.type === 'cone' ? CH / 2 : 0, th = p.type === 'cone' ? .08 : FT + .12;
-    for (let q = 0; q < 4; q++) tile(g, T / 2 * .92, th, T / 2 * .92, (q & 1) * T / 2 + T / 4, y, (q >> 1) * T / 2 + T / 4, q);
+    const th = p.type === 'cone' ? .08 : FT + .12;
+    for (let q = 0; q < 4; q++) {
+      const u = (q & 1) * .5 + .25, v = (q >> 1) * .5 + .25;
+      const y = p.type === 'cone' ? coneHeightAt(p.flip || 0, u, v) + .05 : 0;
+      tile(g, T / 2 * .92, th, T / 2 * .92, u * T, y, v * T, q);
+    }
   } else {
     const sub = new THREE.Group(); sub.position.set(0, H / 2, 0); sub.rotation.z = RAMP_ANG; g.add(sub);
-    for (const su of [-1, 1]) for (const sv of [-1, 1]) tile(sub, RAMP_LEN / 2 * .92, .08, T / 2 * .92, su * RAMP_LEN / 4, .02, sv * T / 4, -1);
+    for (const su of [-1, 0, 1]) for (const sv of [-1, 0, 1]) tile(sub, RAMP_LEN / 3 * .92, .08, T / 3 * .92, su * RAMP_LEN / 3, .12, sv * T / 3, -1);
     g.updateMatrixWorld(true);
-    const cx = p.x * T + T / 2, cz = p.z * T + T / 2, w = new V3();
-    for (const t of tiles) { t.getWorldPosition(w); t.userData.idx = (w.x > cx ? 1 : 0) + (w.z > cz ? 2 : 0); }
+    const x0 = p.x * T, z0 = p.z * T, w = new V3(), cell = n => Math.max(0, Math.min(2, Math.floor(n / T * 3)));
+    for (const t of tiles) { t.getWorldPosition(w); t.userData.idx = cell(w.x - x0) + 3 * cell(w.z - z0); }
   }
   g.userData.tiles = tiles; scene.add(g); return g;
 }
@@ -820,6 +848,7 @@ function paintTiles() {
   for (const t of edit.overlay.userData.tiles) {
     const i = t.userData.idx;
     if (edit.piece.type === 'ramp') t.material = edit.path.includes(i) ? tileMats.path : i === edit.hover ? tileMats.hover : tileMats.base;
+    else if (edit.piece.type === 'cone') t.material = edit.sel.has(i) || i === edit.hover ? tileMats.hover : tileMats.base;
     else t.material = edit.sel.has(i) ? (i === edit.hover ? tileMats.hover : tileMats.sel) : i === edit.hover ? tileMats.hover : tileMats.base;
     if (edit.flash > 0) t.material = tileMats.bad;
     t.userData.pop = Math.max(0, (t.userData.pop || 0) - .12);
@@ -848,9 +877,13 @@ function editPress() {
 }
 function popTile(idx) { for (const t of edit.overlay.userData.tiles) if (t.userData.idx === idx) t.userData.pop = 1; }
 function selFromMask() {
-  edit.sel.clear();
-  const p = edit.piece, n = p.type === 'wall' ? 9 : 4;
-  if (p.type !== 'ramp') for (let i = 0; i < n; i++) if (!(p.mask >> i & 1)) edit.sel.add(i);
+  edit.sel.clear(); selFromPiece(edit.piece, edit.sel);
+}
+function selFromPiece(p, sel) {
+  if (p.type === 'cone') { for (let i = 0; i < 4; i++) if ((p.flip || 0) >> i & 1) sel.add(i); return; }
+  if (p.type === 'ramp') return;
+  const n = p.type === 'wall' ? 9 : 4;
+  for (let i = 0; i < n; i++) if (!(p.mask >> i & 1)) sel.add(i);
 }
 function editRelease() {
   if (!edit || !edit.drag) return;
@@ -863,11 +896,15 @@ function confirmEdit() {
     const path = edit.path;
     if (path.length >= 2) {
       const a = path[0], b = path[path.length - 1];
-      const du = (b & 1) - (a & 1), dv = (b >> 1) - (a >> 1);
+      const du = b % 3 - a % 3, dv = ((b / 3) | 0) - ((a / 3) | 0);
       let nd = -1;
-      if (du && !dv) nd = du > 0 ? 0 : 2; else if (dv && !du) nd = dv > 0 ? 1 : 3;
+      if (du || dv) nd = Math.abs(du) >= Math.abs(dv) ? (du > 0 ? 0 : 2) : (dv > 0 ? 1 : 3);
       if (nd >= 0 && nd !== p.a) { p.a = nd; rebuildPiece(p); checkSupport(); sfx('confirm'); }
     }
+  } else if (p.type === 'cone') {
+    let flip = 0;
+    for (const i of edit.sel) flip |= 1 << i;
+    if (flip !== (p.flip || 0)) { p.flip = flip; rebuildPiece(p); sfx('confirm'); }
   } else {
     const n = p.type === 'wall' ? 9 : 4; let mask = (1 << n) - 1;
     for (const i of edit.sel) mask &= ~(1 << i);
@@ -882,7 +919,8 @@ function confirmEdit() {
 }
 function resetEdit() {
   const p = edit.piece;
-  if (p.type !== 'ramp' && p.mask !== fullMask(p.type)) { p.mask = fullMask(p.type); p.doorOpen = 0; rebuildPiece(p); }
+  if (p.type === 'cone' && p.flip) { p.flip = 0; rebuildPiece(p); }
+  else if (p.type !== 'ramp' && p.type !== 'cone' && p.mask !== fullMask(p.type)) { p.mask = fullMask(p.type); p.doorOpen = 0; rebuildPiece(p); }
   sfx('confirm'); exitEdit();
 }
 function exitEdit() {
@@ -1162,7 +1200,7 @@ function refreshHud(force) {
   document.querySelectorAll('.mat').forEach(s => s.classList.toggle('on', s.dataset.mat === MAT_ORDER[matIdx]));
   const ml = $('modeLabel');
   if (mode === 'build') ml.innerHTML = 'Build · <b>' + TYPE_NAME[buildType] + '</b> · ' + MATS[MAT_ORDER[matIdx]].name + ' <span style="opacity:.7">(right-click to switch)</span>';
-  else if (mode === 'edit') ml.innerHTML = '<b>Editing ' + TYPE_NAME[edit.piece.type] + '</b> · ' + (edit.piece.type === 'ramp' ? 'drag from the low end toward the high end' : 'drag across tiles to cut them');
+  else if (mode === 'edit') ml.innerHTML = '<b>Editing ' + TYPE_NAME[edit.piece.type] + '</b> · ' + (edit.piece.type === 'ramp' ? 'drag toward the side the stairs should climb to' : edit.piece.type === 'cone' ? 'select corners to flip them up' : 'drag across tiles to cut them');
   else if (mode === 'rifle') ml.innerHTML = '<b>Assault rifle</b> · hold to fire';
   else ml.innerHTML = '<b>Pickaxe</b> · harvest trees, rocks and crates';
   $('crosshair').classList.toggle('build', mode === 'build' || mode === 'edit');
@@ -1437,7 +1475,7 @@ if (window.matchMedia && matchMedia('(pointer: coarse)').matches && !matchMedia(
 /* ---------- starter fort so the first frame shows the mechanics ---------- */
 function seedBuilds(list) {
   for (const b of list) {
-    const p = makePiece(b, b.m, { mask: b.mask != null ? b.mask : fullMask(b.type), hp: MATS[b.m].hp, building: false });
+    const p = makePiece(b, b.m, { mask: b.mask != null && b.type !== 'cone' ? b.mask : fullMask(b.type), flip: b.flip || 0, hp: MATS[b.m].hp, building: false });
     if (!pieces.has(p.key)) attachPiece(p);
   }
 }
@@ -1451,7 +1489,7 @@ const starter = [
   { type: 'floor', x: -1, y: 1, z: -2, m: 'wood', mask: 15 & ~(1 << 0) },
   { type: 'wall', a: 'x', x: -2, y: 1, z: -1, m: 'metal', mask: 511 & ~(1 << 4) },
   { type: 'ramp', a: 3, x: 0, y: 0, z: -2, m: 'wood' },
-  { type: 'cone', x: -2, y: 1, z: -2, m: 'brick' },
+  { type: 'cone', x: -2, y: 1, z: -2, m: 'brick', flip: 0b0011 },
   { type: 'wall', a: 'z', x: -2, y: 1, z: -2, m: 'metal' },
 ];
 
@@ -1506,7 +1544,7 @@ function frame(t) {
 
 function snapshot() {
   return {
-    builds: [...pieces.values()].map(p => ({ type: p.type, a: p.a, x: p.x, y: p.y, z: p.z, m: p.mat, mask: p.mask })),
+    builds: [...pieces.values()].map(p => ({ type: p.type, a: p.a, x: p.x, y: p.y, z: p.z, m: p.mat, mask: p.mask, flip: p.flip || 0 })),
     mats: { ...mats }, stats: { ...stats }, pos: [P.x, P.y, P.z], yaw, pitch,
   };
 }
