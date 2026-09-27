@@ -17,6 +17,7 @@
   <div id="aimInfo" hidden><span id="aimName"></span><div class="bar"><b id="aimBar"></b></div><span id="aimHp"></span></div>
   <div id="hint"></div>
   <div id="toast"></div>
+  <div id="fps" hidden><b id="fpsNum">0</b> FPS <span id="fpsMs"></span></div>
   <div id="stats">
     <div class="stat"><small>Eliminations</small><b id="stElims">0</b></div>
     <div class="stat"><small>Builds</small><b id="stBuilds">0</b></div>
@@ -52,7 +53,7 @@
   <div class="panel">
     <div>
       <h1 class="title display">Box Fight<span>Lab</span></h1>
-      <p class="lede">A building and editing playground. Throw up walls, stairs, floors and cones on a Fortnite-sized grid, cut rounded doors, windows and arches into them, and box up against sentry turrets.</p>
+      <p class="lede">A building and editing playground. Throw up walls, stairs, floors and cones on a Fortnite-sized grid, cut doors, windows and arches into them, and box up against sentry turrets.</p>
       <div class="btns">
         <button class="btn" id="play" type="button">Play</button>
         <button class="btn ghost" id="clear" type="button">Clear all builds</button>
@@ -66,6 +67,21 @@
         <label class="row" for="invertY">Invert controller look <input type="checkbox" id="invertY"></label>
         <label class="row" for="editRelease">Confirm edit on release <input type="checkbox" id="editRelease"></label>
         <label class="row" for="turretsOn">Sentry turrets shoot at you <input type="checkbox" id="turretsOn"></label>
+        <h3>Performance</h3>
+        <label class="row" for="fpsCap">Frame rate limit
+          <select id="fpsCap">
+            <option value="0">Unlimited (screen refresh)</option>
+            <option value="30">30 FPS</option>
+            <option value="60">60 FPS</option>
+            <option value="120">120 FPS</option>
+            <option value="144">144 FPS</option>
+            <option value="165">165 FPS</option>
+            <option value="240">240 FPS</option>
+          </select></label>
+        <label class="row" for="showFps">Show FPS <input type="checkbox" id="showFps"></label>
+        <label class="row" for="renderScale">Render resolution <span class="rs"><output id="renderScaleOut">100%</output><input type="range" id="renderScale" min="50" max="100" step="5"></span></label>
+        <label class="row" for="shadowsOn">Shadows <input type="checkbox" id="shadowsOn"></label>
+        <p class="sub">A browser can't draw faster than your screen refreshes, so limits above that have no effect.</p>
       </div>
     </div>
     <div class="controls">

@@ -21,7 +21,7 @@ const SLOTS = ['pickaxe', 'rifle', 'wall', 'floor', 'ramp', 'cone'];
 const RAMP_ROT = [0, -Math.PI / 2, Math.PI, Math.PI / 2];
 const SPAWN = [2, 0, 10];
 
-const settings = { sens: 1, padSens: 1, invertY: false, editRelease: true, turrets: true };
+const settings = { sens: 1, padSens: 1, invertY: false, editRelease: true, turrets: true, fpsCap: 0, showFps: true, renderScale: 100, shadows: true };
 try { Object.assign(settings, JSON.parse(localStorage.getItem('bfl-settings') || '{}')); } catch (e) {}
 function saveSettings() { try { localStorage.setItem('bfl-settings', JSON.stringify(settings)); } catch (e) {} }
 
@@ -53,7 +53,8 @@ function keyName(code) {
 /* ---------- renderer ---------- */
 const canvas = $('view');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+function applyRenderScale() { renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2) * settings.renderScale / 100); }
+applyRenderScale();
 renderer.outputEncoding = THREE.sRGBEncoding;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -86,6 +87,7 @@ sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 Object.assign(sun.shadow.camera, { left: -45, right: 45, top: 45, bottom: -45, near: 1, far: 160 });
 sun.shadow.bias = -0.0005; sun.shadow.normalBias = 0.03;
+sun.castShadow = settings.shadows;
 scene.add(sun, sun.target);
 
 /* ---------- textures ---------- */
@@ -338,8 +340,8 @@ function filletGeo(shape, depth, su, sv) {
   for (let i = 0; i < pos.count; i++) uv.setXY(i, pos.getX(i) / su, pos.getY(i) / sv);
   return geo;
 }
-// Rounded cut-outs: each convex corner of a removed region that sits between two remaining
-// tiles gets a fillet. A wall opening that reaches the ground and is 2+ tiles wide gets a full arch.
+// Fortnite rounds only arches: an opening that reaches the ground and is 2+ tiles wide gets a
+// curved top corner on each side that still has wall. Windows and doors stay square.
 function fillets(cols, rows, mask, tw, th) {
   const inb = (u, v) => u >= 0 && v >= 0 && u < cols && v < rows;
   const has = (u, v) => inb(u, v) && (mask >> (u + cols * v) & 1) === 1;
@@ -349,16 +351,25 @@ function fillets(cols, rows, mask, tw, th) {
     for (const cu of [0, 1]) for (const cv of [0, 1]) {
       const sx = cu ? 1 : -1, sy = cv ? 1 : -1;
       if (!has(u + sx, v) || !has(u, v + sy)) continue;
-      let r = Math.min(tw, th) * 0.32;
-      if (rows === 3 && cv === 1) {
-        let open = true;
-        for (let k = 0; k <= v; k++) if (has(u, k)) open = false;
-        if (open && inb(u - sx, v) && !has(u - sx, v)) r = Math.min(tw, th) * 0.96;
-      }
-      out.push({ x: (u + cu) * tw, y: (v + cv) * th, ix: -sx, iy: -sy, r });
+      if (cv !== 1) continue;
+      let open = true;
+      for (let k = 0; k <= v; k++) if (has(u, k)) open = false;
+      if (!open || !inb(u - sx, v) || has(u - sx, v)) continue;
+      out.push({ x: (u + cu) * tw, y: (v + cv) * th, ix: -sx, iy: -sy, r: Math.min(tw, th) * 0.96 });
     }
   }
   return out;
+}
+// A door edit is one column cut from the ground up two tiles, with the top tile and both sides left.
+function doorColumn(mask) {
+  const has = i => (mask >> i & 1) === 1;
+  for (let u = 0; u < 3; u++) {
+    if (has(u) || has(u + 3) || !has(u + 6)) continue;
+    let ok = true;
+    for (const nu of [u - 1, u + 1]) if (nu >= 0 && nu < 3 && (!has(nu) || !has(nu + 3))) ok = false;
+    if (ok) return u;
+  }
+  return -1;
 }
 function tilesConnected(mask) {
   const cells = [];
@@ -392,6 +403,15 @@ function buildMesh(d, mats, lineMat) {
       add(geo, mats.solid, u * T / 3 + T / 6, v * H / 3 + H / 6, 0);
     }
     for (const f of fillets(3, 3, d.mask, T / 3, H / 3)) add(filletGeo(filletShape(f.x, f.y, f.ix, f.iy, f.r), WT, T, H), mats.solid, 0, 0, 0);
+    const du = doorColumn(d.mask);
+    if (du >= 0 && !lineMat) {
+      const hinge = new THREE.Group(); hinge.position.set(du * T / 3 + .03, 0, 0);
+      const geo = new THREE.BoxGeometry(T / 3 - .06, H * 2 / 3 - .04, .1); tileUV(geo, du / 3, 0, 1 / 3, 2 / 3);
+      const panel = new THREE.Mesh(geo, mats.solid); panel.position.set((T / 3 - .06) / 2, H / 3 - .02, 0);
+      const knob = new THREE.Mesh(new THREE.SphereGeometry(.07, 8, 6), poleMat); knob.position.set(T / 3 - .3, H / 3 - .1, 0);
+      hinge.add(panel, knob); content.add(hinge);
+      g.userData.door = { hinge, center: new V3(du * T / 3 + T / 6, H / 3, 0) };
+    }
     g.position.set(d.x * T, d.y * H, d.z * T);
     if (d.a === 'z') g.rotation.y = -Math.PI / 2;
     c = [T / 2, H / 2, 0];
@@ -401,10 +421,6 @@ function buildMesh(d, mats, lineMat) {
       const qu = q & 1, qv = q >> 1;
       const geo = new THREE.BoxGeometry(T / 2, FT, T / 2); tileUV(geo, qu / 2, qv / 2, .5, .5);
       add(geo, mats.solid, qu * T / 2 + T / 4, 0, qv * T / 2 + T / 4);
-    }
-    for (const f of fillets(2, 2, d.mask, T / 2, T / 2)) {
-      const geo = filletGeo(filletShape(f.x, f.y, f.ix, f.iy, f.r), FT, T, T); geo.rotateX(Math.PI / 2);
-      add(geo, mats.solid, 0, 0, 0);
     }
     g.position.set(d.x * T, d.y * H, d.z * T);
     c = [T / 2, 0, T / 2];
@@ -432,6 +448,12 @@ function pieceSolids(p) {
       const ya = y0 + v * H / 3, yb = ya + H / 3;
       if (p.a === 'x') out.push({ box: true, min: [x0 + u * T / 3, ya, z0 - WT / 2], max: [x0 + (u + 1) * T / 3, yb, z0 + WT / 2], piece: p });
       else out.push({ box: true, min: [x0 - WT / 2, ya, z0 + u * T / 3], max: [x0 + WT / 2, yb, z0 + (u + 1) * T / 3], piece: p });
+    }
+    const du = doorColumn(p.mask);
+    if (du >= 0) {
+      const a0 = du * T / 3, a1 = a0 + T / 3, top = y0 + H * 2 / 3;
+      if (p.a === 'x') out.push({ box: true, door: true, min: [x0 + a0, y0, z0 - .08], max: [x0 + a1, top, z0 + .08], piece: p });
+      else out.push({ box: true, door: true, min: [x0 - .08, y0, z0 + a0], max: [x0 + .08, top, z0 + a1], piece: p });
     }
   } else if (p.type === 'floor') {
     for (let q = 0; q < 4; q++) {
@@ -550,6 +572,7 @@ function blockers(x, y, z, out) {
   for (const s of solids) {
     if (s.box) {
       const m = s.min, M = s.max;
+      if (s.door && s.piece.doorOpen > .3) continue;
       if (M[1] <= y + STEP || m[1] >= y + PH) continue;
       if (x + PR <= m[0] || x - PR >= M[0] || z + PR <= m[2] || z - PR >= M[2]) continue;
       out.push(s);
@@ -574,6 +597,7 @@ function groundAt(x, y, z) {
   for (const s of solids) {
     if (s.box) {
       const m = s.min, M = s.max;
+      if (s.door && s.piece.doorOpen > .3) continue;
       if (M[1] > y + STEP || M[1] <= g) continue;
       if (x + r <= m[0] || x - r >= M[0] || z + r <= m[2] || z - r >= M[2]) continue;
       g = M[1]; gp = s.piece;
@@ -589,6 +613,7 @@ function ceilingAt(x, y, z, ny) {
   for (const s of solids) {
     let b = null;
     if (s.box) {
+      if (s.door && s.piece.doorOpen > .3) continue;
       if (x + PR <= s.min[0] || x - PR >= s.max[0] || z + PR <= s.min[2] || z - PR >= s.max[2]) continue;
       b = s.min[1];
     } else { const h = slopeH(s, x, z); if (h !== null) b = h - RT; }
@@ -677,32 +702,45 @@ function quantDir() {
   return Math.abs(fx) > Math.abs(fz) ? (fx > 0 ? 0 : 2) : (fz > 0 ? 1 : 3);
 }
 const DIRV = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+// Fortnite-style targeting: follow the crosshair ray out to build reach, then snap to the grid.
+// Builds land in your own cell or one of the 8 around it; the level comes from where you look.
+const BUILD_REACH = T * 1.5;
+function aimPoint() {
+  const far = aimNear + BUILD_REACH;
+  const hit = cast(camera.position, fwd, pieceGroups().concat([ground]), far, aimNear);
+  const t = hit ? Math.max(aimNear, hit.distance - .05) : far;
+  return camera.position.clone().addScaledVector(fwd, t);
+}
 function computeTarget(type) {
   const bl = Math.max(0, Math.floor((P.y + 0.3) / H));
   const cx = Math.floor(P.x / T), cz = Math.floor(P.z / T);
-  const clampL = (l, lo, hi) => Math.max(0, Math.max(lo, Math.min(hi, l)));
-  const aheadPt = head.clone().addScaledVector(fwd, T * 1.05);
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const pt = aimPoint();
+  let dx = clamp(Math.floor(pt.x / T) - cx, -1, 1), dz = clamp(Math.floor(pt.z / T) - cz, -1, 1);
+  const lvlAt = y => Math.floor((y + H * .25) / H);
+  const yd = quantDir();
   let d;
   if (type === 'wall') {
-    const dir = quantDir(); let x = cx, z = cz, a, t;
-    if (dir === 0 || dir === 2) { a = 'z'; x = cx + (dir === 0 ? 1 : 0); t = (x * T - head.x) / fwd.x; }
-    else { a = 'x'; z = cz + (dir === 1 ? 1 : 0); t = (z * T - head.z) / fwd.z; }
+    if (dx && dz) { if (yd === 0 || yd === 2) dz = 0; else dx = 0; }   // diagonal: keep the axis you face
+    if (!dx && !dz) { dx = DIRV[yd][0]; dz = DIRV[yd][1]; }           // aiming into your own cell: wall in front
+    let a, x = cx, z = cz, t;
+    if (dx) { a = 'z'; x = cx + (dx > 0 ? 1 : 0); t = (x * T - camera.position.x) / fwd.x; }
+    else { a = 'x'; z = cz + (dz > 0 ? 1 : 0); t = (z * T - camera.position.z) / fwd.z; }
     let lvl = bl;
-    if (isFinite(t) && t > 0 && t < 30) lvl = clampL(Math.floor((head.y + fwd.y * t) / H), bl - 1, bl + 1);
-    d = { type, a, x, y: lvl, z };
+    if (isFinite(t) && t > 0 && t < 40) lvl = clamp(Math.floor((camera.position.y + fwd.y * t) / H), bl - 1, bl + 1);
+    d = { type, a, x, y: Math.max(0, lvl), z };
   } else if (type === 'floor') {
-    d = { type, x: Math.floor(aheadPt.x / T), z: Math.floor(aheadPt.z / T), y: clampL(Math.round(aheadPt.y / H), bl, bl + 2) };
+    d = { type, x: cx + dx, z: cz + dz, y: Math.max(0, clamp(lvlAt(pt.y), bl, bl + 2)) };
   } else if (type === 'ramp') {
-    const dir = (quantDir() + buildRot) % 4; let lvl = bl;
+    const dir = (yd + buildRot) % 4;
+    let lvl = clamp(lvlAt(pt.y), bl, bl + 1);
     const gp = P.groundPiece;
-    if (gp && gp.type === 'ramp') lvl = gp.a === dir ? gp.y + 1 : gp.a === (dir + 2) % 4 ? gp.y - 1 : gp.y;
-    if (pitch > 0.6) lvl++;
-    const fd = quantDir(); let x = cx + DIRV[fd][0], z = cz + DIRV[fd][1];
-    if (pitch < -0.75) { x = cx; z = cz; lvl = bl; }
-    d = { type, a: dir, x, y: Math.max(0, lvl), z };
+    if (gp && gp.type === 'ramp' && (dx || dz) && pitch < .6)
+      lvl = gp.a === dir ? gp.y + 1 : gp.a === (dir + 2) % 4 ? gp.y - 1 : gp.y;
+    d = { type, a: dir, x: cx + dx, y: Math.max(0, lvl), z: cz + dz };
   } else {
-    if (pitch > 0.25) d = { type, x: cx, z: cz, y: bl + 1 };
-    else d = { type, x: Math.floor(aheadPt.x / T), z: Math.floor(aheadPt.z / T), y: clampL(Math.round(aheadPt.y / H), bl, bl + 1) };
+    if (pitch > .25) d = { type, x: cx, z: cz, y: bl + 1 };
+    else d = { type, x: cx + dx, z: cz + dz, y: Math.max(0, clamp(lvlAt(pt.y), bl, bl + 1)) };
   }
   d.mask = fullMask(type);
   return d;
@@ -828,7 +866,7 @@ function confirmEdit() {
       const du = (b & 1) - (a & 1), dv = (b >> 1) - (a >> 1);
       let nd = -1;
       if (du && !dv) nd = du > 0 ? 0 : 2; else if (dv && !du) nd = dv > 0 ? 1 : 3;
-      if (nd >= 0 && nd !== p.a) { p.a = nd; p.popT = .55; rebuildPiece(p); checkSupport(); sfx('confirm'); }
+      if (nd >= 0 && nd !== p.a) { p.a = nd; rebuildPiece(p); checkSupport(); sfx('confirm'); }
     }
   } else {
     const n = p.type === 'wall' ? 9 : 4; let mask = (1 << n) - 1;
@@ -838,13 +876,13 @@ function confirmEdit() {
       toast(mask ? "Can't make that edit" : 'Keep at least one tile'); sfx('deny');
       selFromMask(); edit.flash = 1; edit.path = []; return;
     }
-    if (mask !== p.mask) { p.mask = mask; p.popT = .55; rebuildPiece(p); sfx('confirm'); }
+    if (mask !== p.mask) { p.mask = mask; p.doorOpen = 0; rebuildPiece(p); sfx('confirm'); }
   }
   exitEdit();
 }
 function resetEdit() {
   const p = edit.piece;
-  if (p.type !== 'ramp' && p.mask !== fullMask(p.type)) { p.mask = fullMask(p.type); p.popT = .55; rebuildPiece(p); }
+  if (p.type !== 'ramp' && p.mask !== fullMask(p.type)) { p.mask = fullMask(p.type); p.doorOpen = 0; rebuildPiece(p); }
   sfx('confirm'); exitEdit();
 }
 function exitEdit() {
@@ -1039,6 +1077,18 @@ function updateWorld(dt) {
   }
   for (const p of pieces.values()) {
     if (p.popT < 1) { p.popT = Math.min(1, p.popT + dt / .22); p.group.userData.pivot.scale.setScalar(Math.max(.01, easeOutBack(p.popT))); }
+    const door = p.group.userData.door;
+    if (door) {
+      const local = p.group.worldToLocal(new V3(P.x, P.y + 1, P.z));
+      const dist = Math.hypot(local.x - door.center.x, local.z);
+      const near = dist < 2.6 && Math.abs(local.y - door.center.y) < 2.5;
+      p.doorOpen = p.doorOpen || 0;
+      if (near && p.doorOpen < .05) door.side = local.z > 0 ? 1 : -1;
+      const was = p.doorOpen;
+      p.doorOpen = Math.max(0, Math.min(1, p.doorOpen + (near ? 1 : -1) * dt * 4));
+      if ((was === 0 && p.doorOpen > 0) || (was > .95 && p.doorOpen <= .95 && !near)) sfx('door');
+      door.hinge.rotation.y = (door.side || 1) * p.doorOpen * 1.75;
+    }
     if (!p.building) continue;
     p.hp += p.maxHp * .9 / MATS[p.mat].time * dt;
     if (p.hp >= p.maxHp) { p.hp = p.maxHp; p.building = false; }
@@ -1189,6 +1239,7 @@ function sfx(k, v = 1) {
     case 'hurt': tone(200, .18, 'sawtooth', .1, .5); break;
     case 'turret': tone(900, .12, 'square', .03 * v, .4); break;
     case 'deny': tone(170, .1, 'square', .05); break;
+    case 'door': noise(.18, .08, 300, 1.5); tone(140, .12, 'triangle', .05, 1.3); break;
   }
 }
 
@@ -1372,6 +1423,15 @@ function pollPad(dt) {
 }
 window.addEventListener('gamepadconnected', () => toast('Controller connected'));
 
+const capEl = $('fpsCap'), showFpsEl = $('showFps'), rsEl = $('renderScale'), shEl = $('shadowsOn');
+capEl.value = String(settings.fpsCap); showFpsEl.checked = settings.showFps; rsEl.value = settings.renderScale; shEl.checked = settings.shadows;
+$('renderScaleOut').value = settings.renderScale + '%';
+$('fps').hidden = !settings.showFps;
+capEl.addEventListener('change', () => { settings.fpsCap = +capEl.value; saveSettings(); });
+showFpsEl.addEventListener('change', () => { settings.showFps = showFpsEl.checked; $('fps').hidden = !settings.showFps; saveSettings(); });
+rsEl.addEventListener('input', () => { settings.renderScale = +rsEl.value; $('renderScaleOut').value = rsEl.value + '%'; applyRenderScale(); resize(); saveSettings(); });
+shEl.addEventListener('change', () => { settings.shadows = shEl.checked; sun.castShadow = shEl.checked; saveSettings(); });
+
 if (window.matchMedia && matchMedia('(pointer: coarse)').matches && !matchMedia('(pointer: fine)').matches) $('touchNote').hidden = false;
 
 /* ---------- starter fort so the first frame shows the mechanics ---------- */
@@ -1384,6 +1444,7 @@ function seedBuilds(list) {
 const starter = [
   { type: 'wall', a: 'x', x: -2, y: 0, z: -1, m: 'wood' },
   { type: 'wall', a: 'x', x: -1, y: 0, z: -1, m: 'wood', mask: 511 & ~(1 << 1) & ~(1 << 4) },
+  { type: 'wall', a: 'z', x: 0, y: 0, z: -1, m: 'brick', mask: 511 & ~(1 << 0) & ~(1 << 1) },
   { type: 'wall', a: 'z', x: -2, y: 0, z: -1, m: 'brick' },
   { type: 'wall', a: 'z', x: -2, y: 0, z: -2, m: 'brick' },
   { type: 'floor', x: -2, y: 1, z: -2, m: 'wood' },
@@ -1395,10 +1456,23 @@ const starter = [
 ];
 
 /* ---------- loop ---------- */
-let lastT = performance.now();
+let lastT = performance.now(), fpsFrames = 0, fpsStart = performance.now(), worstMs = 0;
 function frame(t) {
   requestAnimationFrame(frame);
-  const dt = Math.min(.05, (t - lastT) / 1000); lastT = t;
+  // frame rate limit: skip this refresh if the next frame isn't due yet (1 ms slack for timer jitter)
+  if (settings.fpsCap && t - lastT < 1000 / settings.fpsCap - 1) return;
+  const rawMs = t - lastT;
+  const dt = Math.min(.05, rawMs / 1000); lastT = t;
+  fpsFrames++; worstMs = Math.max(worstMs, rawMs);
+  if (t - fpsStart >= 500) {
+    const fps = Math.round(fpsFrames * 1000 / (t - fpsStart));
+    if (settings.showFps) {
+      const n = $('fpsNum'); n.textContent = fps;
+      n.className = fps >= 55 ? '' : fps >= 30 ? 'mid' : 'low';
+      $('fpsMs').textContent = (1000 / Math.max(1, fps)).toFixed(1) + ' ms · worst ' + worstMs.toFixed(0);
+    }
+    fpsFrames = 0; fpsStart = t; worstMs = 0;
+  }
   pollPad(dt);
   if (solidsDirty) rebuildSolids();
   const adsOn = !paused && mode === 'rifle' && (mouseR || pad.ads);
